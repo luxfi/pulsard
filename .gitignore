@@ -1,0 +1,12 @@
+# LaTeX build artifacts (docs/talus-design.tex compiles in CI)
+*.pdf
+*.aux
+*.log
+*.out
+*.toc
+
+# Go
+/pulsard
+/cmd/pulsard/pulsard
+*.test
+*.out

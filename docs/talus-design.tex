@@ -1,0 +1,243 @@
+% Copyright (C) 2019-2026, Lux Industries Inc. All rights reserved.
+% pulsard: the offline threshold ML-DSA (FIPS-204) signer for the Pulsar lane.
+% Design of the dealerless TALUS path, its fail-closed boundary, and the
+% interop+trust contract a concrete engine must satisfy.
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{enumitem}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\newcommand{\HighBits}{\mathsf{HighBits}}
+\newcommand{\LowBits}{\mathsf{LowBits}}
+\newcommand{\MakeHint}{\mathsf{MakeHint}}
+\newcommand{\FindHint}{\mathsf{FindHint}}
+\newcommand{\Verify}{\mathsf{Verify}}
+\newcommand{\Sign}{\mathsf{Sign}}
+\newcommand{\ctx}{\mathit{ctx}}
+\newcommand{\subj}{\mathit{subject}}
+\newcommand{\Ring}{R_q}
+\newcommand{\norm}[1]{\lVert #1 \rVert_\infty}
+
+\theoremstyle{definition}
+\newtheorem{contract}{Contract}
+\theoremstyle{plain}
+\newtheorem{claim}{Claim}
+
+\title{\texttt{pulsard}: Offline Threshold ML-DSA for the Lux Pulsar Lane\\
+\large Design of the dealerless TALUS path and its fail-closed boundary}
+\author{Lux Industries --- Cryptography}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\texttt{pulsard} is the offline signer that produces the Lux Quasar
+\emph{Pulsar} finality lane: \emph{one} ordinary FIPS-204 ML-DSA-65 signature
+over a $32$-byte subject, verifiable on chain by \texttt{warp.VerifyPulsar} (a
+plain \(\Verify\) under a group public key). This document specifies the
+intended \emph{dealerless} threshold construction (TALUS), states precisely
+where the implementation is deliberately \emph{fail-closed}, and fixes the
+interop and trust contract that any concrete threshold engine must satisfy
+before it may be wired behind the \texttt{ThresholdEngine} SPI. It is written to
+be adversarially reviewed: the honest position is that the dealerless threshold
+crypto is research-grade and is therefore \emph{not} shipped as working code.
+\end{abstract}
+
+\section{Scope and the produce/verify asymmetry}
+
+The chain's trust anchor is a single, standard object:
+\[
+\Verify\bigl(\mathsf{pk}_{\text{group}},\ \subj,\ \ctx,\ \sigma\bigr)
+\quad\text{with}\quad
+\ctx = \texttt{"LUX-QUASAR-PULSAR-MLDSA65-v1"},
+\]
+where \(\mathsf{pk}_{\text{group}}\) is an ordinary ML-DSA-65 public key and
+\(\sigma\) is an ordinary FIPS-204 signature. Everything below the verification
+boundary --- nonce DKG, commitment carry, carry elimination, secure comparison,
+blame, aggregation --- exists only to \emph{produce} \(\sigma\) from key shares
+without ever reconstructing the secret. The verifier never learns the protocol
+that produced \(\sigma\); it checks a single ML-DSA signature. \texttt{pulsard}
+realises the \emph{produce} side; \texttt{warp} realises \emph{verify}; the two
+share exactly one definition of the key-era record (\texttt{warp.PulsarKeyEra}).
+
+\paragraph{The release gate.} Independently of which engine produces \(\sigma\),
+\texttt{pulsard} re-runs \texttt{warp.VerifyPulsar} on the assembled evidence
+before returning it (\texttt{Signer.ThresholdSign} $\to$ \texttt{ReleaseGate}).
+A signature that does not verify under the chain's own verifier is discarded.
+Thus correctness of \emph{emitted} evidence is a property of \texttt{pulsard},
+not of the engine: a buggy or malicious engine can cause liveness failure, never
+the emission of invalid evidence.
+
+\section{Why threshold ML-DSA is hard}
+
+ML-DSA (FIPS-204, Dilithium lineage) signs by sampling a masking nonce
+\(y\), computing the commitment \(w = A y\), deriving the challenge
+\(c = H(\mu \,\|\, w_1)\) where \(w_1 = \HighBits(w)\), and releasing
+\(z = y + c\,s_1\) together with a hint \(h\). The map is \emph{not} linear in
+the nonce: \(\HighBits\) and the low-order residual \(r_0=\LowBits(w)\) are
+rounding operations. Consequently there is no homomorphic nonce commitment, and
+the FROST blueprint --- additively share the nonce, sum partial signatures ---
+\emph{does not} yield a valid ML-DSA signature. This is the wall every
+threshold-ML-DSA attempt hits.
+
+\section{The TALUS construction (intended dealerless path)}
+\label{sec:talus}
+
+TALUS (Kao, \emph{Threshold ML-DSA with One-Round Online Signing via Boundary
+Clearance and Carry Elimination}, arXiv:2603.22109) goes \emph{around} the wall
+rather than through it. \texttt{pulsard} models its phases as a control-plane
+state machine (\texttt{protocol.go}, \texttt{session.go}); the cryptographic
+content of each phase is the engine's responsibility.
+
+\begin{description}[leftmargin=1.6em]
+  \item[Shamir nonce DKG (\textsc{PhaseNonceDKG}).] A dealerless, one-time joint
+  nonce \(\bar y = \sum_i \lambda_i y_i\) is Shamir-shared so that \emph{no}
+  node ever forms \(\bar y\). (\texttt{NonceDKGDeal}.)
+
+  \item[Boundary Clearance Condition (\textsc{PhaseBCC}).] Accept only nonces
+  whose commitment keeps \(\norm{r_0} < \gamma_2 - \beta\), so the secret shift
+  \(c\,s_2\) cannot cross a \(\HighBits\) boundary and the hint becomes
+  \emph{publicly} computable from \(w' = A z - c\,t_1 2^d\) via \(\FindHint\).
+  The acceptance probability is \(\approx 31.7\%\); a non-clear nonce is
+  discarded. (\texttt{BCCShare}.)
+
+  \item[Carry Elimination Framework (\textsc{PhaseCEF}).] Compute
+  \(w_1 = \HighBits(A\bar y)\) over the secret-shared nonce \emph{without}
+  reconstructing \(\bar y\) and \emph{without} revealing \(w_0=\LowBits(w)\)
+  (revealing \(w_0\) leaks the key residual \(w'-w = c\,t_0 - c\,s_2\); this is
+  the \textsc{W-LEAK} hazard). (\texttt{CEFCarryShare}.)
+
+  \item[Secure-comparison sub-protocol (\textsc{PhaseCSCP}).] Realise the
+  \(\HighBits\) boundary count as a secure comparison over secret-shared \(w\),
+  so that no node or process forms \(w_0\) or \(w\) even transiently. This is the
+  step that closes the \textsc{W-LEAK} residual. Information-theoretic privacy of
+  the degree-\(2(T-1)\) products formed by the BGW multiplication substrate
+  requires, for reconstruction threshold \(T \ge 3\), a committee of
+  \(N \ge 2T-1\) (TALUS Thm.~10.1; \texttt{Committee.MinPartiesMPC}).
+  (\texttt{CSCPShare}.)
+
+  \item[Blame (\textsc{PhaseBlame}).] Identifiable abort: a detected fault is
+  attributed to a specific node before the session aborts. (\texttt{BlameAccusation}.)
+
+  \item[Aggregate (\textsc{PhaseAggregate}).] The single \emph{online} broadcast
+  round: derive \(c = H(\mu \,\|\, w_1)\); each signer broadcasts
+  \(z_i = \lambda_i y_i + c\,\lambda_i s_{1,i}\); the coordinator sums
+  \(z = \sum_i z_i\), recovers \(h\) from public data, and assembles a stock
+  FIPS-204 signature \((\tilde c, z, h)\). (\texttt{PartialZ}.)
+\end{description}
+
+\paragraph{Two trust profiles.} The online path and the emitted signature are
+byte-identical across both; only the custody of \(w\) during preprocessing
+differs. \textsc{Talus-TEE} lets a trusted coordinator/TEE form \(w\) and the
+BCC filter directly (no honest-majority bound). \textsc{Talus-MPC} is TEE-free:
+\(w_1\) is computed by CEF/CSCP over shares (honest majority, \(N\ge 2T-1\) for
+\(T\ge 3\)). \emph{Only \textsc{Talus-MPC} delivers the permissionless property
+the Pulsar lane advertises.}
+
+\section{Security argument and its boundary}
+
+\paragraph{What the signature inherits.} The output is a standard FIPS-204
+signature. Its unforgeability is exactly ML-DSA EUF-CMA, which reduces to
+Module-LWE / Module-SIS in the (Q)ROM. BCC and CEF change only \emph{how} the
+same \((\tilde c, z, h)\) is produced, never \emph{what} a verifier checks.
+
+\paragraph{What the protocol must additionally guarantee} (and what is
+\emph{not} yet established in shipped code):
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{Zero key leakage.} The transcript must not reveal \(s_1, s_2,
+  t_0\) or \(w_0\). The \textsc{W-LEAK} hazard is real; the CSCP is the
+  mitigation. A semi-honest-only CSCP does not meet the malicious threat model.
+  \item \textbf{Dealerless keygen.} Permissionless safety requires the group key
+  itself to come from a dealerless DKG. A trusted-dealer keygen reintroduces a
+  single point of compromise and is \emph{not} the advertised property.
+  \item \textbf{Identifiable abort under honest majority.} A malicious minority
+  must not be able to halt progress without attribution.
+  \item \textbf{Transcript indistinguishability (caveat).} The threshold signing
+  transcript may be \emph{distinguishable} in distribution from a single-party
+  ML-DSA transcript (masked CEF broadcasts and per-party \(z_i\) are extra
+  observables), even though the \emph{final signature} is byte-standard. This is
+  a known caveat to state, bound, and review --- not to paper over.
+\end{enumerate}
+
+\section{The fail-closed boundary}
+
+\texttt{pulsard} ships the control plane (state machine, session/nonce plumbing,
+key-era records, release gate) as working, tested code, and the threshold
+\emph{crypto} as a fail-closed stub:
+\begin{itemize}[leftmargin=1.6em]
+  \item The default \texttt{ThresholdEngine} is \texttt{Unimplemented()}; every
+  crypto operation returns \texttt{ErrThresholdMLDSAUnimplemented}.
+  \item No partial, hand-wavy threshold arithmetic is present. An honest
+  fail-closed stub is correct; unsound ``looks-done'' threshold logic is a
+  forgery surface and is worse than no code.
+  \item The single-party \texttt{ReferenceDealer} is the only engine that
+  produces a signature. It is a labelled dev/test \emph{footgun}: it holds the
+  whole group secret and has \emph{no} threshold property. It exists to prove the
+  verify integration and nothing else.
+\end{itemize}
+
+\section{The engine contract (review gate)}
+
+A concrete dealerless engine (the natural candidate is the
+\texttt{github.com/luxfi/pulsar} reference, which already emits CIRCL-compatible
+FIPS-204 signatures) may be registered behind the SPI \emph{only} after all of
+the following are established and reviewed.
+
+\begin{contract}[Interop]
+The engine's output $\sigma$ satisfies
+\(\Verify(\mathsf{pk}_{\text{group}}, \subj, \ctx, \sigma)=\mathsf{true}\) under
+\texttt{github.com/luxfi/crypto/pq/mldsa/mldsa65} with
+\(\ctx=\texttt{LaneContext}\), for the \emph{same} resolved
+\(\mathsf{pk}_{\text{group}}\) bytes the chain resolves. This is mechanically
+enforced by \texttt{ReleaseGate}; it must also be proven for the engine's own
+key encoding (CIRCL packed public key) so that liveness, not just safety, holds.
+\end{contract}
+
+\begin{contract}[Dealerless keygen]
+\(\mathsf{pk}_{\text{group}}\) and the shares are produced by a dealerless DKG
+(e.g.\ Pedersen/Gennaro over the relevant ring), with no party ever holding the
+master secret. A trusted-dealer keygen disqualifies the engine from the
+permissionless profile.
+\end{contract}
+
+\begin{contract}[Malicious security]
+The CSCP/CEF realises secure \(\HighBits\) with malicious security and
+identifiable abort under an honest majority (\(N\ge 2T-1\) for \(T\ge 3\)); the
+transcript opens only \(\{\text{validity flags},\ \text{uniform masks},\ w_1\}\)
+and provably no function of \(\{s_1,s_2,t_0,w_0\}\).
+\end{contract}
+
+\begin{contract}[Dual-PQ key independence]
+When the Pulsar (ML-DSA) lane is combined with the Corona (Module-LWE) lane in
+the dual-PQ AND-mode cert, the two group keys are generated from independent
+randomness (no shared seed); otherwise dual-PQ collapses to single-PQ.
+\end{contract}
+
+\begin{contract}[Distribution caveat bounded]
+The transcript-indistinguishability caveat of \S4 is either closed or its
+adversarial advantage is bounded and accepted in the threat model.
+\end{contract}
+
+Until Contracts~1--5 hold, the dealerless engine stays unregistered and
+\texttt{pulsard} stays fail-closed. This is the deliberate, honest state of the
+art: the service, the verify integration, and the protocol structure are real;
+the dealerless threshold crypto is pending review.
+
+\section*{References}
+\begin{itemize}[leftmargin=1.6em]
+  \item NIST FIPS 204, \emph{Module-Lattice-Based Digital Signature Standard}, 2024.
+  \item M.~Kao, \emph{TALUS: Threshold ML-DSA with One-Round Online Signing via
+  Boundary Clearance and Carry Elimination}, arXiv:2603.22109.
+  \item Ben-Or, Goldwasser, Wigderson, \emph{Completeness Theorems for
+  Non-Cryptographic Fault-Tolerant Distributed Computation}, STOC 1988 (BGW).
+  \item Gennaro, Jarecki, Krawczyk, Rabin, \emph{Secure Distributed Key
+  Generation for Discrete-Log Based Cryptosystems}, EUROCRYPT 1999.
+  \item \texttt{github.com/luxfi/pulsar} --- the TALUS reference implementation
+  (BCC/CEF/CSCP), and its \texttt{BLOCKERS.md}/\texttt{AUDIT-2026-06.md}.
+\end{itemize}
+
+\end{document}
