@@ -42,7 +42,7 @@ correctness is a property of pulsard, independent of the engine.
 ## Build & test
 
 ```sh
-SDKROOT="$(xcrun --show-sdk-path)" GOWORK=off GOFLAGS=-mod=mod GOPRIVATE=github.com/luxfi/* \
+SDKROOT="$(xcrun --show-sdk-path)" GOWORK=off GOFLAGS=-mod=mod GOPRIVATE=github.com/lux-private/* \
   go build ./... && go test ./...
 ```
 
