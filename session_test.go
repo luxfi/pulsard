@@ -37,7 +37,7 @@ func TestSession_HappyPath(t *testing.T) {
 	}
 
 	mustAdvance(pulsard.PhaseNonceDKG)
-	for i := pulsard.NodeID(0); i < 3; i++ {
+	for i := range pulsard.NodeID(3) {
 		if err := s.RecordNonceDeal(pulsard.NonceDKGDeal{NonceID: nonceID, From: i}); err != nil {
 			t.Fatalf("RecordNonceDeal: %v", err)
 		}
@@ -47,19 +47,19 @@ func TestSession_HappyPath(t *testing.T) {
 	}
 
 	mustAdvance(pulsard.PhaseBCC)
-	for i := pulsard.NodeID(0); i < 3; i++ {
+	for i := range pulsard.NodeID(3) {
 		_ = s.RecordBCC(pulsard.BCCShare{NonceID: nonceID, From: i})
 	}
 	mustAdvance(pulsard.PhaseCEF)
-	for i := pulsard.NodeID(0); i < 3; i++ {
+	for i := range pulsard.NodeID(3) {
 		_ = s.RecordCEF(pulsard.CEFCarryShare{NonceID: nonceID, From: i})
 	}
 	mustAdvance(pulsard.PhaseCSCP)
-	for i := pulsard.NodeID(0); i < 3; i++ {
+	for i := range pulsard.NodeID(3) {
 		_ = s.RecordCSCP(pulsard.CSCPShare{NonceID: nonceID, From: i})
 	}
 	mustAdvance(pulsard.PhaseAggregate)
-	for i := pulsard.NodeID(0); i < 3; i++ {
+	for i := range pulsard.NodeID(3) {
 		_ = s.RecordPartialZ(pulsard.PartialZ{NonceID: nonceID, From: i})
 	}
 	if !s.HasQuorum(pulsard.PhaseAggregate) {

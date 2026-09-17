@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"slices"
 
 	"github.com/luxfi/warp"
 )
@@ -60,10 +61,8 @@ func NewNoncePool() *NoncePool {
 
 // Add admits a prepared nonce id (idempotent on duplicates).
 func (p *NoncePool) Add(id [32]byte) {
-	for _, e := range p.ids {
-		if e == id {
-			return
-		}
+	if slices.Contains(p.ids, id) {
+		return
 	}
 	p.ids = append(p.ids, id)
 }
